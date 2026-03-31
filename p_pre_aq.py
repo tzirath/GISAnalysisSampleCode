@@ -26,7 +26,7 @@ print("="*80)
 # CONFIGURATION
 # ============================================================================
 
-BASE_DIR = '/Users/tzirath/Library/CloudStorage/OneDrive-MaynoothUniversity/PhD/ComputationalFramework/'
+BASE_DIR = '/.../PhD/ComputationalFramework/'
 DATA_DIR = BASE_DIR + 'data/Portland/'
 OUTPUT_DIR = BASE_DIR + 'preproccessing/processed/p_aq_processed/'
 
