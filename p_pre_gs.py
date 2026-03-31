@@ -28,8 +28,8 @@ print("="*80)
 # CONFIGURATION
 # ============================================================================
 
-BASE_DIR = '/Users/tzirath/Library/CloudStorage/OneDrive-MaynoothUniversity/PhD/ComputationalFramework/data/Portland'
-OUTPUT_DIR = '/Users/tzirath/Library/CloudStorage/OneDrive-MaynoothUniversity/PhD/ComputationalFramework/preproccessing/processed/p_gs_processed/'
+BASE_DIR = '/.../PhD/ComputationalFramework/data/Portland'
+OUTPUT_DIR = '/.../PhD/ComputationalFramework/preproccessing/processed/p_gs_processed/'
 
 ADDRESSES_PATH = BASE_DIR + '/p_address/p_address/Active_Address_Points.shp'
 PARKS_PATH = BASE_DIR + '/p_greenspace/p_parks/Parks.shp'
