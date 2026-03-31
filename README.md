@@ -1,25 +1,19 @@
 # Portland Urban Mental Wellbeing Index — Environmental Exposure Preprocessing
 
-A geospatial preprocessing and methodology pipeline for quantifying residential exposure to three urban environmental **contextual cues** linked to mental health outcomes: **air quality**, **greenspace access**, and **transit mobility**. Developed as part of a PhD thesis (Chapter 4) implementing published epidemiological thresholds at city scale for Portland, Oregon.
+
+A geospatial preprocessing pipeline for quantifying residential exposure to three urban environmental **contextual cues** linked to mental health outcomes: **air quality**, **greenspace access**, and **transit mobility**. Developed as part of a PhD thesis (Chapter 4) implementing published epidemiological thresholds at city scale for Portland, Oregon.
 
 ---
-## Key Features
 
-- **Scale**: 815,000+ residential addresses processed
-- **Data Integration**: 30+ heterogeneous datasets (EPA, municipal GIS, Census, TriMet)
-- **Quality Control**: 94-100% temporal data completeness achieved
-- **Spatial Precision**: cKDTree indexing with Oregon State Plane (EPSG:6554) for accurate metric distances
-- **Reproducible**: Modular design enabling replication across cities (Chicago, Manchester implementations included)
-  
 ## Project Overview
 
-This pipeline computes address-level environmental exposure scores for all residential addresses in Portland using literature-derived thresholds. Each script processes raw city data into a scored, population-weighted **contextual cue** that feeds into a composite Urban Mental Wellbeing Index (UMWI, 3–15 scale).
+This pipeline processes raw city data into address-level environmental exposure scores for all residential addresses in Portland. Each of the three preprocessing scripts implements a distinct literature-derived methodology, producing outputs that feed into a composite **Urban Mental Wellbeing Index (UMWI, 3–15 scale)**.
 
-The three contextual cues operationalise findings from:
-
-- **Air Quality** — Chen et al. (2018): PM₂.₅ z-score standardisation relative to a city baseline
-- **Greenspace** — Gascon et al. (2018): proximity to parks ≥ 0.5 ha within 300–500 m
-- **Transit Mobility** — Wang et al. (2019): distance to public transit within an 850 m walkability threshold
+| Contextual Cue | Script | Literature Basis |
+|---|---|---|
+| Air Quality | `p_pre_aq.py` + `p_aq_method.py` | Chen et al. (2018) — PM₂.₅ z-score standardisation |
+| Greenspace | `p_pre_gs.py` | Gascon et al. (2018) — Parks ≥ 0.5 ha within 300–500 m |
+| Transit Mobility | `p_pre_m.py` | Wang et al. (2019) — Transit within 850 m walkability threshold |
 
 ---
 
@@ -34,35 +28,129 @@ ComputationalFramework/
 ├── analysis/
 │   └── methodology/
 │       └── p_aq_method.py   # Air quality risk scoring & population weighting
-├── data/
-│   └── Portland/
-│       ├── p_airquality/portland_aq/   # EPA-format Excel files (per monitor)
-│       ├── p_address/p_address/        # Active_Address_Points.shp
-│       ├── p_boundaries/               # Neighborhoods_regions.shp
-│       ├── p_greenspace/p_parks/       # Parks.shp
-│       ├── p_mobility/                 # tm_stops.shp (TriMet)
-│       └── p_census/                   # p_population.xlsx
-└── results/
-    └── methodology_output/portland/
-        └── p_airquality_results/
-            └── p_aq_method_results/    # Output files and figures
+└── data/
+    └── Portland/
+        ├── p_airquality/portland_aq/   # EPA-format Excel files (per monitor)
+        ├── p_address/p_address/        # Active_Address_Points.shp
+        ├── p_boundaries/               # Neighborhoods_regions.shp
+        ├── p_greenspace/p_parks/       # Parks.shp
+        ├── p_mobility/                 # tm_stops.shp (TriMet)
+        └── p_census/                   # p_population.xlsx
 ```
 
 ---
 
-## Methodology
+## Installation
 
-### 1. Air Quality — Chen et al. (2018)
+```bash
+pip install geopandas pandas numpy scipy matplotlib openpyxl shapely
+```
 
-Monthly PM₂.₅ readings from EPA-format Excel files are aggregated per monitoring station, then standardised against a Portland-wide city baseline (μ_City, σ_City). Each month receives a risk score on a 1–5 scale based on its z-score (Table 4.4). Annual address scores are averaged across 12 months and aggregated to a population-weighted city score.
+Python 3.8+ required.
 
-**Z-score formula:**
+---
+
+## Usage
+
+```bash
+# Air quality — preprocessing must run before methodology
+python preproccessing/p_pre_aq.py
+python analysis/methodology/p_aq_method.py
+
+# Greenspace and transit (independent)
+python preproccessing/p_pre_gs.py
+python preproccessing/p_pre_m.py
+```
+
+The greenspace and transit scripts are fully independent. The air quality methodology script (`p_aq_method.py`) depends on outputs from `p_pre_aq.py` and must run second.
+
+---
+
+## Air Quality Preprocessing — Deep Dive (`p_pre_aq.py`)
+
+### Overview
+
+Implements the Chen et al. (2018) PM₂.₅ z-score standardisation methodology. Raw EPA monitor readings are aggregated to monthly averages, standardised against a Portland city baseline, and then spatially assigned to residential addresses via nearest-monitor distance.
+
+**Input:** EPA-format `.xlsx` files (one per monitoring station) with `Longitude`, `Latitude`, date, and PM₂.₅ columns  
+**Output:** Monthly z-scores, city baseline parameters, and addresses linked to their nearest monitor
+
+---
+
+### Processing Pipeline
+
+#### Step 1 — Load Monitor Data
+
+All `.xlsx` files in `data/Portland/p_airquality/portland_aq/` are loaded and concatenated. The second column in each file is normalised to `PM2.5`. Monitor names are derived from filenames. If `State Name` and `County Name` columns are present, data is filtered to Oregon / Multnomah County.
+
+```python
+all_files = glob.glob(AQ_DATA_PATH + "/*.xlsx")
+df_temp = pd.read_excel(filename, engine='openpyxl')
+df_temp.rename(columns={old_col_name: 'PM2.5'}, inplace=True)
+```
+
+Date columns are detected by name pattern (`date` / `time`) and parsed from the format `HH:MM MM/DD/YYYY`. The pipeline then filters to `STUDY_YEAR = 2024`.
+
+---
+
+#### Step 2 — Data Validation
+
+Monitor completeness is assessed against days elapsed in 2024 (a leap year, 366 days). Per-station statistics include total records, valid PM₂.₅ count, days of coverage, and completion percentage.
+
+EPA range validation:
+
+```python
+EPA_VALID_RANGE = (0, 500)  # μg/m³
+valid_range = (df['PM2.5'] >= 0) & (df['PM2.5'] <= 500)
+```
+
+Records outside this range are excluded before further processing.
+
+---
+
+#### Step 3 — Monthly Aggregation
+
+Daily readings are grouped by monitor station and calendar month to produce 30-day averages, following the Chen et al. (2018) aggregation window:
+
+```python
+monthly_pm25 = df_2024.groupby(
+    ['monitor_name', 'Latitude', 'Longitude', 'year', 'month']
+)['PM2.5'].mean()
+```
+
+Output column: `PM25_monthly` — mean PM₂.₅ concentration per station-month in μg/m³.
+
+---
+
+#### Step 4 — City Baseline Calculation
+
+A Portland-wide baseline (μ_City, σ_City) is calculated from all 2024 monthly averages across all monitors. These parameters define what constitutes "normal" air quality for the city and anchor all downstream z-score thresholds.
+
+```python
+mu_city    = monthly_pm25['PM25_monthly'].mean()   # μ_City
+sigma_city = monthly_pm25['PM25_monthly'].std()    # σ_City
+```
+
+Standard deviation thresholds are printed for reference:
+
+| Threshold | Formula |
+|---|---|
+| −1 SD | `μ − σ` |
+| Mean | `μ` |
+| +1 SD (Chen harm threshold) | `μ + σ` |
+| +1.5 SD | `μ + 1.5σ` |
+
+---
+
+#### Step 5 — Z-Score Standardisation
+
+Each monthly average is standardised against the city baseline:
 
 ```
 Z = (PM2.5_monthly − μ_City) / σ_City
 ```
 
-**Risk score thresholds (Table 4.4):**
+The resulting distribution should have mean ≈ 0 and std ≈ 1. Z-scores are then categorised into five risk bands:
 
 | Risk Score | Level | Z-Score Range |
 |---|---|---|
@@ -72,21 +160,92 @@ Z = (PM2.5_monthly − μ_City) / σ_City
 | 4 | High Risk | +1.0 < Z ≤ +1.5 (Chen et al. harm threshold) |
 | 5 | Very High Risk | Z > +1.5 |
 
-**City-level population-weighted score:**
-
-```
-City Score = Σ(Risk_Score_j × Population_j) / Σ(Population_j)
-```
-
-A city score ≥ 4.0 corresponds to the Chen et al. (2018) +1 SD harm threshold and is associated with a **+6.67 percentage point increase in severe psychological distress**.
-
-**Quality control:** Values outside `EPA_VALID_RANGE = (0, 500) μg/m³` are excluded.
+A city-level score ≥ 4.0 is associated with a **+6.67 percentage point increase in severe psychological distress** (Chen et al., 2018).
 
 ---
 
-### 2. Greenspace — Gascon et al. (2018)
+#### Step 6 — Spatial Setup
 
-Parks are filtered to ≥ 0.5 ha (`MIN_PARK_SIZE_HECTARES = 0.5`; 5,000 m²) based on Gascon et al.'s finding that only parks of this size produce measurable mental health benefits. Distance is calculated from each residential address to the **nearest eligible park boundary** (not centroid) using a cKDTree spatial index.
+Monitoring station coordinates are converted from WGS84 to the project CRS:
+
+```python
+TARGET_CRS = 'EPSG:6554'   # NAD83(2011) / Oregon State Plane North (metres)
+
+stations_gdf = gpd.GeoDataFrame(
+    stations_geo, geometry='geometry', crs='EPSG:4326'
+).to_crs(TARGET_CRS)
+```
+
+---
+
+#### Step 7 — Address Filtering
+
+Residential addresses are loaded from `Active_Address_Points.shp` (only `ADDRESS_TY` and `geometry` columns to minimise memory). Two-stage filtering is applied:
+
+1. **Spatial** — addresses within the union of Portland neighbourhood polygons (`Neighborhoods_regions.shp`)
+2. **Type** — records where `ADDRESS_TY == 'RESIDENTIAL'`
+
+---
+
+#### Step 8 — Assign Addresses to Nearest Monitor
+
+A `cKDTree` is built on monitor coordinates (in EPSG:6554 metres). Each residential address is queried for its nearest monitor in a single vectorised pass:
+
+```python
+station_tree = cKDTree(station_coords)
+distances, nearest_indices = station_tree.query(addr_coords)
+
+addresses['distance_to_monitor_m'] = distances
+addresses['nearest_monitor_name']  = stations_gdf.iloc[nearest_indices]['monitor_name'].values
+```
+
+Distance statistics (mean, median, min, max) and the per-monitor address assignment split are printed for verification.
+
+---
+
+#### Step 9 — Save Outputs
+
+| File | Format | Contents |
+|---|---|---|
+| `portland_monthly_pm25_zscores.csv` | CSV | Monthly PM₂.₅ averages, z-scores per monitor-month |
+| `portland_city_baseline.csv` | CSV | μ_City and σ_City parameters |
+| `portland_monitoring_stations.geojson` | GeoJSON | Station point locations in EPSG:6554 |
+| `portland_addresses_with_monitors.geojson` | GeoJSON | Residential addresses with nearest monitor and distance |
+| `portland_airquality_summary_stats.csv` | CSV | Full summary statistics table |
+
+All files written to `preproccessing/processed/p_aq_processed/`.
+
+---
+
+### Air Quality Output Visualisations
+
+Spatial and statistical outputs generated from the processed data:
+
+**Neighbourhood-level air quality risk map**
+
+![Air Quality Risk Map](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig1_portland_aq_map.png)
+
+**Monthly risk score distribution (2024)**
+
+![Monthly Risk Distribution](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig2_monthly_risk_distribution.png)
+
+**Annual address-level score distribution**
+
+![Annual Score Distribution](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig3_annual_score_distribution.png)
+
+**Monthly PM₂.₅ z-score timeline by monitor**
+
+![Z-Score Timeline](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig4_zscore_timeline.png)
+
+**Address-level scores with monitor locations**
+
+![Spatial Detail](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig5_spatial_detail_monitors_addresses.png)
+
+---
+
+## Greenspace Preprocessing (`p_pre_gs.py`)
+
+Implements Gascon et al. (2018). Parks are filtered to ≥ 0.5 ha (`MIN_PARK_SIZE_HECTARES = 0.5`; 5,000 m²). Distance is measured from each residential address to the **nearest eligible park boundary** (not centroid) using `cKDTree` over boundary vertex coordinates, processed in batches of 10,000 addresses.
 
 **Distance thresholds:**
 
@@ -96,147 +255,65 @@ Parks are filtered to ≥ 0.5 ha (`MIN_PARK_SIZE_HECTARES = 0.5`; 5,000 m²) bas
 | ≤ 500 m (`EXTENDED_BENEFIT_M`) | Moderate protective effect | OR ≈ 0.84 — 16% lower depression risk |
 | > 500 m | Reduced / no protective effect | — |
 
+**Outputs:**
+
+| File | Description |
+|---|---|
+| `portland_parks_eligible.geojson` | Parks filtered to ≥ 0.5 ha |
+| `portland_addresses_with_distances.geojson` | Addresses with distance to nearest eligible park boundary |
+| `portland_greenspace_summary_stats.csv` | Counts at 300 m and 500 m thresholds |
+
 ---
 
-### 3. Transit Mobility — Wang et al. (2019)
+## Transit Mobility Preprocessing (`p_pre_m.py`)
 
-Distance from each residential address to the nearest TriMet transit stop (bus, MAX light rail, streetcar) is calculated. Addresses beyond the critical walkability threshold are flagged as having **elevated depression risk** per Wang et al.
+Implements Wang et al. (2019). Distance from each residential address to the nearest TriMet stop is calculated using `cKDTree`. Addresses beyond 850 m are flagged as having **elevated depression risk**.
+
+Transit types are inferred from TriMet route numbering:
+
+- **MAX Light Rail:** routes 90, 100, 190, 200, 290
+- **Portland Streetcar:** NS, Loop
+- **WES Commuter Rail:** `WES`-prefixed routes
+- **Bus:** all remaining numeric routes
 
 **Distance thresholds:**
 
 | Distance | Classification |
 |---|---|
-| ≤ 400 m (`OPTIMAL_THRESHOLD_M`) | Strong accessibility — 5-minute walk |
-| ≤ 850 m (`CRITICAL_THRESHOLD_M`) | Acceptable accessibility — 10-minute walk at 5 km/h |
+| ≤ 400 m (`OPTIMAL_THRESHOLD_M`) | Strong accessibility — 5-min walk |
+| ≤ 850 m (`CRITICAL_THRESHOLD_M`) | Acceptable — 10-min walk at 5 km/h |
 | > 850 m | Elevated depression risk (Wang et al., 2019) |
 
-Portland transit classification uses TriMet route numbering to distinguish stop types:
+**Outputs:**
 
-- **MAX Light Rail (Rail):** routes 90, 100, 190, 200, 290
-- **Portland Streetcar:** NS (North-South), Loop
-- **WES Commuter Rail:** routes prefixed `WES`
-- **Bus:** all remaining numeric routes
+| File | Description |
+|---|---|
+| `portland_transit_stops_combined.geojson` | All TriMet stops with type classification |
+| `portland_{type}_stops.geojson` | Stops by type (bus / rail / streetcar) |
+| `portland_addresses_with_transit_distances.geojson` | Addresses with distance and nearest stop type |
+| `portland_transit_summary_stats.csv` | Coverage at 400 m and 850 m thresholds |
 
 ---
 
 ## Technical Approach
 
-### Coordinate Reference System
+### Spatial Operations
 
-All spatial operations use **Oregon State Plane (NAD83)** — `TARGET_CRS = 'EPSG:6554'` — a metric CRS ensuring accurate distance calculations in metres. All input datasets are reprojected to this CRS before processing.
-
-### Spatial Indexing
-
-Distance calculations for large address datasets use **`scipy.spatial.cKDTree`** for efficient nearest-neighbour queries. Greenspace distances are measured to **park boundary vertices** (not centroids) for spatial accuracy. Transit and air quality distances are measured to point geometries (stop and monitor locations respectively).
-
-Addresses are processed in **batches of 10,000** to manage memory.
+All distance calculations use **Oregon State Plane (NAD83)** — `EPSG:6554` — a metric CRS ensuring accuracy in metres. Inputs are reprojected before any spatial operation. Nearest-neighbour queries use `scipy.spatial.cKDTree`; addresses are processed in batches of 10,000 for memory efficiency.
 
 ### Address Filtering
 
-Residential filtering is applied in two stages:
-1. **Spatial filter** — addresses falling within Portland neighbourhood boundaries (`Neighborhoods_regions.shp`)
-2. **Type filter** — records where `ADDRESS_TY == 'RESIDENTIAL'`
+Applied consistently across all three scripts:
+1. **Spatial filter** — within Portland neighbourhood boundaries
+2. **Type filter** — `ADDRESS_TY == 'RESIDENTIAL'`
 
-### Quality Control
+### Validation
 
-- PM₂.₅ readings outside `(0, 500) μg/m³` are excluded prior to aggregation
-- Monitor data completeness is reported per station (days covered / days elapsed)
-- Addresses inside or touching park boundaries (`distance < 1.0 m`) are flagged
-- Addresses > 5 km from the nearest feature are reported as potential outliers
-- All intermediate statistics are printed for audit and reproducibility
-
----
-
-## Installation
-
-### Prerequisites
-
-- Python 3.8+
-- The following libraries:
-
-```bash
-pip install geopandas pandas numpy scipy matplotlib openpyxl shapely
-```
-
-### Clone the Repository
-
-```bash
-git clone <your-repo-url>
-cd ComputationalFramework
-```
-
----
-
-## Usage
-
-Scripts must be run in order within each cue domain. Preprocessing outputs are consumed by the methodology script.
-
-### Air Quality
-
-```bash
-# Step 1: Preprocess PM2.5 monitor data
-python preproccessing/p_pre_aq.py
-
-# Step 2: Compute risk scores and population-weighted city score
-python analysis/methodology/p_aq_method.py
-```
-
-### Greenspace
-
-```bash
-python preproccessing/p_pre_gs.py
-```
-
-### Transit Mobility
-
-```bash
-python preproccessing/p_pre_m.py
-```
-
----
-
-## Output Files
-
-### Air Quality Preprocessing (`p_pre_aq.py`)
-
-| File | Format | Description |
-|---|---|---|
-| `portland_monthly_pm25_zscores.csv` | CSV | Monthly PM₂.₅ averages and z-scores per monitor |
-| `portland_city_baseline.csv` | CSV | City-wide μ_City and σ_City parameters |
-| `portland_monitoring_stations.geojson` | GeoJSON | Monitor locations in `EPSG:6554` |
-| `portland_addresses_with_monitors.geojson` | GeoJSON | Residential addresses with nearest monitor assignment and distance |
-| `portland_airquality_summary_stats.csv` | CSV | Summary statistics table |
-
-### Air Quality Methodology (`p_aq_method.py`)
-
-| File | Format | Description |
-|---|---|---|
-| `portland_airquality_comprehensive_results.xlsx` | XLSX (9 sheets) | Full results: city score, monthly distribution, annual stats, monitor scores, neighbourhood rankings |
-| `portland_addresses_with_aq_scores.geojson` | GeoJSON | Address-level annual risk scores |
-| `portland_neighborhood_aq_stats.csv` | CSV | Mean air quality score and population per neighbourhood |
-| `portland_city_aq_score.csv` | CSV | Final population-weighted city score |
-| `fig1_portland_aq_map.png` | PNG (300 dpi) | Choropleth: neighbourhood air quality risk |
-| `fig2_monthly_risk_distribution.png` | PNG (300 dpi) | Bar chart: monthly risk score distribution |
-| `fig3_annual_score_distribution.png` | PNG (300 dpi) | Histogram: address-level annual scores |
-| `fig4_zscore_timeline.png` | PNG (300 dpi) | Line plot: monthly z-scores by monitor |
-| `fig5_spatial_detail_monitors_addresses.png` | PNG (300 dpi) | Address-level scores with monitor locations |
-
-### Greenspace Preprocessing (`p_pre_gs.py`)
-
-| File | Format | Description |
-|---|---|---|
-| `portland_parks_eligible.geojson` | GeoJSON | Parks filtered to ≥ 0.5 ha |
-| `portland_addresses_with_distances.geojson` | GeoJSON | Residential addresses with distance to nearest eligible park boundary |
-| `portland_greenspace_summary_stats.csv` | CSV | Summary including 300 m and 500 m threshold counts |
-
-### Transit Preprocessing (`p_pre_m.py`)
-
-| File | Format | Description |
-|---|---|---|
-| `portland_transit_stops_combined.geojson` | GeoJSON | All TriMet stops with transit type classification |
-| `portland_{type}_stops.geojson` | GeoJSON | Stops split by type (bus, rail, streetcar) |
-| `portland_addresses_with_transit_distances.geojson` | GeoJSON | Residential addresses with distance to nearest stop and stop type |
-| `portland_transit_summary_stats.csv` | CSV | Coverage statistics at 400 m and 850 m thresholds |
+- PM₂.₅ values outside `(0, 500) μg/m³` excluded
+- Monitor completeness reported (days covered / days elapsed in 2024)
+- Park boundary distances < 1.0 m flagged (address inside park)
+- Addresses > 5 km from nearest feature reported as outliers
+- Intermediate statistics printed at every stage for audit
 
 ---
 
@@ -244,26 +321,26 @@ python preproccessing/p_pre_m.py
 
 | Dataset | Source | File |
 |---|---|---|
-| PM₂.₅ monitor readings | EPA / local monitoring network | Excel files in `portland_aq/` |
+| PM₂.₅ monitor readings | EPA / local monitoring network | `.xlsx` files in `portland_aq/` |
 | Residential address points | City of Portland Bureau of Development Services | `Active_Address_Points.shp` |
 | Neighbourhood boundaries | City of Portland | `Neighborhoods_regions.shp` |
 | Parks | Portland Parks & Recreation | `Parks.shp` |
-| Transit stops | TriMet General Transit Feed Specification (GTFS) | `tm_stops.shp` |
+| Transit stops | TriMet GTFS | `tm_stops.shp` |
 | Neighbourhood population | US Census Bureau | `p_population.xlsx` |
 
 ---
 
 ## Replication for Other Cities
 
-The pipeline is city-agnostic in structure. Equivalent scripts exist in this repository for Manchester (`m_*`) and Chicago (`c_*`). To adapt for a new city:
+The pipeline is city-agnostic. Equivalent scripts exist for Manchester (`m_*`) and Chicago (`c_*`). To adapt for a new city:
 
-1. **Air quality:** Provide EPA-format Excel files with `Longitude`, `Latitude`, and a PM₂.₅ column. Update `AQ_DATA_PATH` and verify the date column name.
-2. **Greenspace:** Supply a polygon parks shapefile and update `PARKS_PATH`. The 0.5 ha and 300/500 m thresholds are literature-based and should be retained for cross-city comparability.
-3. **Transit:** Supply a point shapefile of transit stops with a route identifier column. Update the transit type inference logic in `infer_transit_type()` for the local agency's route numbering scheme.
-4. **CRS:** Replace `EPSG:6554` with the appropriate projected CRS for accurate metre-based distance calculations.
-5. **Area constant:** Update `portland_area_km2 = 375.0` in `p_pre_m.py` for transit density calculations.
+1. **Air quality:** Provide EPA-format Excel files with `Longitude`, `Latitude`, and a PM₂.₅ column.
+2. **Greenspace:** Supply a polygon parks shapefile. The 0.5 ha and 300/500 m thresholds are literature-based and should be retained for cross-city comparability.
+3. **Transit:** Supply a point shapefile of stops with a route identifier. Update `infer_transit_type()` for the local agency's route numbering.
+4. **CRS:** Replace `EPSG:6554` with an appropriate projected CRS for the target city.
+5. **Area constant:** Update `portland_area_km2 = 375.0` in `p_pre_m.py` for stop density calculations.
 
-All threshold values (`MIN_PARK_SIZE_HECTARES`, `PROTECTIVE_DISTANCE_M`, `EXTENDED_BENEFIT_M`, `CRITICAL_THRESHOLD_M`, `EPA_VALID_RANGE`) are defined as named constants at the top of each script for easy reconfiguration.
+All threshold constants (`MIN_PARK_SIZE_HECTARES`, `PROTECTIVE_DISTANCE_M`, `EXTENDED_BENEFIT_M`, `CRITICAL_THRESHOLD_M`, `EPA_VALID_RANGE`) are defined at the top of each script.
 
 ---
 
@@ -279,8 +356,11 @@ Wang, R., Liu, Y., Xue, D., Yao, Y., Liu, P., & Helbich, M. (2019). Cross-sectio
 
 ## Author
 
+## Author
+
 **Tzirath Perez Oteiza, PhD**  
 Data Science and Smart Cities  
 Maynooth University, Ireland
 
-*Contact*: [tzirathperez@outlook.com](mailto:tzirathperez@outlook.com) | [LinkedIn](https://www.linkedin.com/in/tzirath-perez/)
+📧 [tzirathperez@outlook.com](mailto:tzirathperez@outlook.com)  
+🔗 [LinkedIn](https://www.linkedin.com/in/tzirath-perez/)
