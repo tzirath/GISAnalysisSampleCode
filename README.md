@@ -1,5 +1,6 @@
-# Portland Urban Mental Wellbeing Index — Environmental Exposure Preprocessing
 
+
+# Portland Urban Mental Wellbeing Index — Environmental Exposure Preprocessing
 
 A geospatial preprocessing pipeline for quantifying residential exposure to three urban environmental **contextual cues** linked to mental health outcomes: **air quality**, **greenspace access**, and **transit mobility**. Developed as part of a PhD thesis (Chapter 4) implementing published epidemiological thresholds at city scale for Portland, Oregon.
 
@@ -297,9 +298,73 @@ Transit types are inferred from TriMet route numbering:
 
 ## Technical Approach
 
-### Spatial Operations
+### cKDTree Nearest-Neighbour Indexing
 
-All distance calculations use **Oregon State Plane (NAD83)** — `EPSG:6554` — a metric CRS ensuring accuracy in metres. Inputs are reprojected before any spatial operation. Nearest-neighbour queries use `scipy.spatial.cKDTree`; addresses are processed in batches of 10,000 for memory efficiency.
+The most computationally significant decision across all three scripts is replacing brute-force distance loops with a **k-d tree spatial index** (`scipy.spatial.cKDTree`). A naïve approach — computing the Euclidean distance from every address to every park boundary vertex or transit stop — would scale as O(n × m), making it infeasible for a city-wide dataset. The k-d tree reduces nearest-neighbour queries to **O(n log m)**, partitioning the coordinate space into a binary search tree that avoids redundant comparisons.
+
+```python
+# Build once, query for all addresses in a single pass
+park_tree = cKDTree(park_boundary_coords)
+distances, nearest_indices = park_tree.query(addr_coords)
+```
+
+The tree is built once on the feature set (park vertices, transit stops, or monitor locations) and then queried for the entire residential address dataset in a vectorised call — no Python loop over addresses.
+
+For large inputs the query is batched in **chunks of 10,000 addresses** to keep peak memory bounded, with the tree itself held in memory throughout:
+
+```python
+for i in range(0, len(addr_coords), 10000):
+    batch_distances, batch_indices = park_tree.query(addr_coords[i:i+10000])
+```
+
+---
+
+### Boundary-Vertex Distance for Greenspace
+
+Transit and air quality use point geometries (stop locations, monitor coordinates), so a standard nearest-point query is exact. Greenspace requires a meaningfully different approach: **distance to the nearest park edge**, not the centroid.
+
+Measuring from an address to a park centroid would overestimate the true walking distance for large, irregularly shaped parks. Instead, `p_pre_gs.py` decomposes every eligible park polygon into its exterior boundary vertices and builds the k-d tree over those vertices:
+
+```python
+for idx, park in parks.iterrows():
+    if park.geometry.geom_type == 'Polygon':
+        boundary_coords = list(park.geometry.exterior.coords)
+    elif park.geometry.geom_type == 'MultiPolygon':
+        for polygon in park.geometry.geoms:
+            boundary_coords = list(polygon.exterior.coords)
+    park_boundary_coords.extend(boundary_coords)
+    park_indices.extend([idx] * len(boundary_coords))
+```
+
+Each boundary point retains its parent park index, so after querying the nearest vertex the result maps directly back to the park it belongs to. A **critical implementation detail** is that the park GeoDataFrame index is reset to contiguous integers after the 0.5 ha filter — without this, the index-based lookup would silently return wrong parks:
+
+```python
+parks = parks[parks['area_hectares'] >= 0.5].copy()
+parks = parks.reset_index(drop=True)   # ensures park_indices[i] == parks.iloc[i]
+```
+
+---
+
+### Population-Weighted City Score (Air Quality Methodology)
+
+The final air quality score is not a simple average — it is a **population-weighted mean** over neighbourhood-level risk scores, implemented via a spatial join followed by a weighted aggregation:
+
+```python
+# Spatial join: assign each address to a neighbourhood
+addresses_with_nbhd = gpd.sjoin(addresses, neighborhoods, how='left', predicate='within')
+
+# Aggregate to neighbourhood level
+nbhd_stats['weighted_score'] = nbhd_stats['mean_aq_score'] * nbhd_stats['population']
+city_aq_score = nbhd_stats['weighted_score'].sum() / nbhd_stats['population'].sum()
+```
+
+This ensures that a neighbourhood housing 50,000 residents contributes proportionally more to the city score than one housing 2,000, reflecting the actual population distribution of exposure rather than treating all neighbourhoods as equal units.
+
+---
+
+### Coordinate Reference System
+
+All spatial operations use **Oregon State Plane (NAD83)** — `EPSG:6554` — a metric CRS ensuring distances are in metres without projection distortion. Every input dataset is reprojected to this CRS before any distance calculation or spatial join.
 
 ### Address Filtering
 
@@ -353,8 +418,6 @@ Gascon, M., Triguero-Mas, M., Martínez, D., Dadvand, P., Rojas-Rueda, D., Plas�
 Wang, R., Liu, Y., Xue, D., Yao, Y., Liu, P., & Helbich, M. (2019). Cross-sectional associations between long-term exposure to physical activity-friendly environments and depression among Chinese older adults: The moderating effects of urbanicity. *Health & Place*, 60, 102190.
 
 ---
-
-## Author
 
 ## Author
 
