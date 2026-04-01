@@ -222,27 +222,34 @@ Spatial and statistical outputs generated from the processed data:
 
 **Neighbourhood-level air quality risk map**
 
-![Air Quality Risk Map](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig1_portland_aq_map.png)
+![Air Quality Risk Map]<img width="2934" height="2822" alt="fig1_portland_aq_map" src="https://github.com/user-attachments/assets/dd24bf45-8344-4c8d-833b-b1cde0564d6e" />
+
 
 **Monthly risk score distribution (2024)**
 
-![Monthly Risk Distribution](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig2_monthly_risk_distribution.png)
+![Monthly Risk Distribution]<img width="2964" height="1764" alt="fig2_monthly_risk_distribution" src="https://github.com/user-attachments/assets/1fbb793e-f0a5-447b-8abf-921d98fc4dde" />
+
 
 **Annual address-level score distribution**
 
-![Annual Score Distribution](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig3_annual_score_distribution.png)
+![Annual Score Distribution]<img width="2965" height="1764" alt="fig3_annual_score_distribution" src="https://github.com/user-attachments/assets/3109a81b-58f7-44ee-8055-e7db648d8a83" />
+
 
 **Monthly PM₂.₅ z-score timeline by monitor**
 
-![Z-Score Timeline](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig4_zscore_timeline.png)
+![Z-Score Timeline] <img width="3563" height="1764" alt="fig4_zscore_timeline" src="https://github.com/user-attachments/assets/ca6126ed-6247-457b-83f2-d45576902ecd" />
+
 
 **Address-level scores with monitor locations**
 
-![Spatial Detail](results/methodology_output/portland/p_airquality_results/p_aq_method_results/fig5_spatial_detail_monitors_addresses.png)
+![Spatial Detail] <img width="3414" height="3356" alt="fig5_spatial_detail_monitors_addresses" src="https://github.com/user-attachments/assets/891ef08a-fca8-4188-a416-a10d74631b83" />
+
 
 ---
 
 ## Greenspace Preprocessing (`p_pre_gs.py`)
+<img width="2934" height="2822" alt="fig1_portland_greenspace_map" src="https://github.com/user-attachments/assets/38d2e5d6-ead0-442c-b83d-1f204032443b" />
+
 
 Implements Gascon et al. (2018). Parks are filtered to ≥ 0.5 ha (`MIN_PARK_SIZE_HECTARES = 0.5`; 5,000 m²). Distance is measured from each residential address to the **nearest eligible park boundary** (not centroid) using `cKDTree` over boundary vertex coordinates, processed in batches of 10,000 addresses.
 
@@ -265,6 +272,8 @@ Implements Gascon et al. (2018). Parks are filtered to ≥ 0.5 ha (`MIN_PARK_SIZ
 ---
 
 ## Transit Mobility Preprocessing (`p_pre_m.py`)
+<img width="2901" height="2822" alt="fig1_portland_mobility_map" src="https://github.com/user-attachments/assets/a5642614-72ed-4ec4-990b-0be433001dbf" />
+
 
 Implements Wang et al. (2019). Distance from each residential address to the nearest TriMet stop is calculated using `cKDTree`. Addresses beyond 850 m are flagged as having **elevated depression risk**.
 
