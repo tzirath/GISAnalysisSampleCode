@@ -1,14 +1,12 @@
-
-
 # Portland Urban Mental Wellbeing Index — Environmental Exposure Preprocessing
 
-A geospatial preprocessing pipeline for quantifying residential exposure to three urban environmental **contextual cues** linked to mental health outcomes: **air quality**, **greenspace access**, and **transit mobility**. Developed as part of a PhD thesis (Chapter 4) implementing published epidemiological thresholds at city scale for Portland, Oregon.
+A geospatial preprocessing and scoring pipeline for quantifying residential exposure to three urban environmental **contextual cues** linked to mental health outcomes: **air quality**, **greenspace access**, and **transit mobility**. Built to operationalise published epidemiological thresholds at city scale, producing address-level risk scores that aggregate into a composite planning indicator — the **Urban Mental Wellbeing Index (UMWI)** — for use in evidence-based urban health and land-use planning.
 
 ---
 
 ## Project Overview
 
-This pipeline processes raw city data into address-level environmental exposure scores for all residential addresses in Portland. Each of the three preprocessing scripts implements a distinct literature-derived methodology, producing outputs that feed into a composite **Urban Mental Wellbeing Index (UMWI, 3–15 scale)**.
+This pipeline processes raw city data into address-level environmental exposure scores for all residential addresses in Portland. Each of the three preprocessing scripts implements a distinct literature-derived methodology, producing scored outputs that aggregate into the **Urban Mental Wellbeing Index (UMWI, 3–15 scale)** — a neighbourhood-level indicator designed to identify areas of compounded environmental disadvantage and support targeted planning and policy intervention.
 
 | Contextual Cue | Script | Literature Basis |
 |---|---|---|
@@ -71,7 +69,7 @@ The greenspace and transit scripts are fully independent. The air quality method
 
 ### Overview
 
-Implements the Chen et al. (2018) PM₂.₅ z-score standardisation methodology. Raw EPA monitor readings are aggregated to monthly averages, standardised against a Portland city baseline, and then spatially assigned to residential addresses via nearest-monitor distance.
+Implements the Chen et al. (2018) PM₂.₅ z-score standardisation methodology. Raw EPA monitor readings are aggregated to monthly averages, standardised against a Portland city baseline, and spatially assigned to residential addresses via nearest-monitor distance. The resulting z-scores feed into a 1–5 risk scoring scheme that is population-weighted to produce a single comparable city-level air quality indicator.
 
 **Input:** EPA-format `.xlsx` files (one per monitoring station) with `Longitude`, `Latitude`, date, and PM₂.₅ columns  
 **Output:** Monthly z-scores, city baseline parameters, and addresses linked to their nearest monitor
@@ -395,9 +393,11 @@ Applied consistently across all three scripts:
 
 ---
 
-## Replication for Other Cities
+## Scalability and Replication
 
-The pipeline is city-agnostic. Equivalent scripts exist for Manchester (`m_*`) and Chicago (`c_*`). To adapt for a new city:
+The pipeline is city-agnostic by design. Equivalent scripts covering **Manchester** (`m_*`) and **Chicago** (`c_*`) are structured identically, enabling cross-city comparison of UMWI scores on a standardised 3–15 scale. All city-specific constants are isolated to the configuration block at the top of each script, with no hard-coded values in the processing logic.
+
+To adapt for a new city:
 
 1. **Air quality:** Provide EPA-format Excel files with `Longitude`, `Latitude`, and a PM₂.₅ column.
 2. **Greenspace:** Supply a polygon parks shapefile. The 0.5 ha and 300/500 m thresholds are literature-based and should be retained for cross-city comparability.
@@ -406,6 +406,17 @@ The pipeline is city-agnostic. Equivalent scripts exist for Manchester (`m_*`) a
 5. **Area constant:** Update `portland_area_km2 = 375.0` in `p_pre_m.py` for stop density calculations.
 
 All threshold constants (`MIN_PARK_SIZE_HECTARES`, `PROTECTIVE_DISTANCE_M`, `EXTENDED_BENEFIT_M`, `CRITICAL_THRESHOLD_M`, `EPA_VALID_RANGE`) are defined at the top of each script.
+
+---
+
+## Planning and Policy Applications
+
+The UMWI pipeline is designed to produce outputs directly usable in planning workflows:
+
+- **Neighbourhood ranking** — population-weighted scores identify areas of compounded environmental disadvantage across all three cues simultaneously
+- **Threshold-based targeting** — the 300/500 m greenspace buffers and 850 m transit threshold map directly onto planning standards for park catchment and walkability zoning
+- **Equity analysis** — by operating at the residential address level and aggregating via census population weights, the index can be cross-tabulated against socioeconomic deprivation data to identify environmental justice gaps
+- **Cross-city benchmarking** — consistent methodology across Portland, Manchester, and Chicago enables comparative analysis of how urban form affects mental health exposure profiles
 
 ---
 
@@ -425,5 +436,7 @@ Wang, R., Liu, Y., Xue, D., Yao, Y., Liu, P., & Helbich, M. (2019). Cross-sectio
 Data Science and Smart Cities  
 Maynooth University, Ireland
 
-📧 [tzirathperez@outlook.com](mailto:tzirathperez@outlook.com)  
+📧 tzirathperez@outlook.com  
 🔗 [LinkedIn](https://www.linkedin.com/in/tzirath-perez/)
+
+*Research interests: urban health analytics, geospatial data pipelines, environmental exposure modelling, evidence-based planning*
