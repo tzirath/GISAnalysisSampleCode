@@ -1,0 +1,687 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Portland Air Quality Contextual Cue Calculation
+Chapter 4 Methodology Implementation: Chen et al. (2018)
+
+Steps:
+1. Load monthly z-scores from preprocessing
+2. Apply Table 4.4 risk scoring (1-5 scale)
+3. Calculate annual address scores (12-month average)
+4. Spatial join to neighborhoods for population weighting
+5. Calculate population-weighted city air quality score
+
+@author: tzirath
+"""
+
+import geopandas as gpd
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
+
+# Check for openpyxl
+try:
+    import openpyxl
+except ImportError:
+    import subprocess
+    subprocess.check_call(['pip', 'install', 'openpyxl'])
+    import openpyxl
+
+print("="*80)
+print("PORTLAND AIR QUALITY CONTEXTUAL CUE CALCULATION")
+print("Chapter 4 Methodology: Risk Scoring & Population Weighting")
+print("="*80)
+
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+BASE_DIR = '/.../PhD/ComputationalFramework/'
+PROCESSED_DIR = BASE_DIR + 'preproccessing/processed/p_aq_processed/'
+OUTPUT_DIR = BASE_DIR + 'results/methodology_output/portland/p_airquality_results/p_aq_method_results/'
+
+# Input files from preprocessing
+MONTHLY_ZSCORES_FILE = PROCESSED_DIR + 'portland_monthly_pm25_zscores.csv'
+ADDRESSES_FILE = PROCESSED_DIR + 'portland_addresses_with_monitors.geojson'
+BASELINE_FILE = PROCESSED_DIR + 'portland_city_baseline.csv'
+STATIONS_FILE = PROCESSED_DIR + 'portland_monitoring_stations.geojson'
+
+# Neighborhoods for population weighting
+DATA_DIR = BASE_DIR + 'data/Portland/'
+NEIGHBORHOODS_PATH = DATA_DIR + 'p_boundaries/Neighborhoods_regions/Neighborhoods_regions.shp'
+POPULATION_PATH = DATA_DIR + 'p_census/p_population.xlsx'
+
+# Table 4.4: Air Quality Risk Thresholds (Chen et al., 2018)
+# Based on z-score standardization
+RISK_THRESHOLDS = {
+    1: (float('-inf'), -1.0),    # Very low risk: Z ≤ -1.0
+    2: (-1.0, 0.0),              # Low risk: -1.0 < Z ≤ 0.0
+    3: (0.0, 1.0),               # Elevated risk: 0.0 < Z ≤ +1.0
+    4: (1.0, 1.5),               # High risk: +1.0 < Z ≤ +1.5 (Chen threshold)
+    5: (1.5, float('inf'))       # Very high risk: Z > +1.5
+}
+
+# CRS for spatial operations
+TARGET_CRS = 'EPSG:6554'  # Oregon State Plane
+
+import os
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ============================================================================
+# STEP 1: LOAD PREPROCESSED DATA
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 1: LOADING PREPROCESSED DATA")
+print("="*80)
+
+print("\nLoading monthly z-scores...")
+monthly_zscores = pd.read_csv(MONTHLY_ZSCORES_FILE)
+print(f"✓ Loaded {len(monthly_zscores)} monthly z-score records")
+
+print("\nLoading city baseline parameters...")
+baseline = pd.read_csv(BASELINE_FILE)
+mu_city = baseline[baseline['parameter'] == 'mu_city']['value'].values[0]
+sigma_city = baseline[baseline['parameter'] == 'sigma_city']['value'].values[0]
+print(f"✓ μ_City: {mu_city:.3f} μg/m³")
+print(f"✓ σ_City: {sigma_city:.3f} μg/m³")
+
+print("\nLoading addresses with monitor assignments...")
+addresses = gpd.read_file(ADDRESSES_FILE)
+print(f"✓ Loaded {len(addresses):,} residential addresses")
+
+print("\nLoading neighborhood boundaries...")
+neighborhoods = gpd.read_file(NEIGHBORHOODS_PATH)
+print(f"✓ Loaded {len(neighborhoods)} neighborhoods")
+
+print("\nLoading population data...")
+population_df = pd.read_excel(POPULATION_PATH)
+print(f"✓ Loaded population data for {len(population_df)} neighborhoods")
+
+# Merge population data
+neighborhoods = neighborhoods.merge(population_df[['NAME', 'population']], 
+                                   on='NAME', 
+                                   how='left')
+total_pop = neighborhoods['population'].sum()
+print(f"✓ Total population: {total_pop:,.0f}")
+
+# ============================================================================
+# STEP 2: APPLY TABLE 4.4 RISK SCORING TO MONTHLY Z-SCORES
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 2: Z-SCORE TO RISK SCORE CLASSIFICATION (TABLE 4.4)")
+print("="*80)
+
+def assign_aq_risk_score(z_score):
+    """
+    Based on Chen et al. (2018) thresholds from Table 4.4
+    """
+    if z_score <= -1.0:
+        return 1
+    elif z_score <= 0.0:
+        return 2
+    elif z_score <= 1.0:
+        return 3
+    elif z_score <= 1.5:
+        return 4
+    else:  # z_score > 1.5
+        return 5
+
+print("\nApplying Chen et al. (2018) risk classification to monthly z-scores...")
+monthly_zscores['monthly_risk_score'] = monthly_zscores['z_score'].apply(assign_aq_risk_score)
+
+print(f"\n✓ Monthly risk scores assigned!")
+
+print(f"\n📊 MONTHLY RISK SCORE DISTRIBUTION:")
+monthly_score_counts = monthly_zscores['monthly_risk_score'].value_counts().sort_index()
+
+risk_levels = {
+    1: "Very Low Risk",
+    2: "Low Risk", 
+    3: "Elevated Risk",
+    4: "High Risk",
+    5: "Very High Risk"
+}
+
+for score in range(1, 6):
+    count = monthly_score_counts.get(score, 0)
+    pct = (count / len(monthly_zscores)) * 100
+    print(f"  Score {score} ({risk_levels[score]}): {count} months ({pct:.1f}%)")
+
+# ============================================================================
+# STEP 3: CALCULATE ANNUAL ADDRESS SCORES (12-MONTH AVERAGE)
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 3: ANNUAL ADDRESS-LEVEL SCORES")
+print("="*80)
+
+print("\n🔬 CALCULATING ANNUAL SCORES:")
+print("  Formula: Annual Score = Σ(Monthly_Risk_Score) / 12")
+
+# Each address gets the score from its assigned monitor
+print("\nMerging monthly scores with address-monitor assignments...")
+
+# Create a mapping of monitor name to monthly scores
+annual_monitor_scores = monthly_zscores.groupby('monitor_name')['monthly_risk_score'].mean().reset_index()
+annual_monitor_scores.columns = ['nearest_monitor_name', 'annual_aq_score']
+
+print(f"✓ Calculated annual scores for {len(annual_monitor_scores)} monitors")
+
+# Join with addresses
+addresses = addresses.merge(annual_monitor_scores, on='nearest_monitor_name', how='left')
+
+print(f"\n✓ Annual air quality scores assigned to addresses!")
+
+# Check for unmatched addresses
+unmatched = addresses['annual_aq_score'].isna().sum()
+if unmatched > 0:
+    print(f"⚠️  {unmatched:,} addresses missing annual scores")
+else:
+    print(f"✓ All addresses have annual scores")
+
+print(f"\n📊 ANNUAL ADDRESS SCORE STATISTICS:")
+print(f"  Mean annual score: {addresses['annual_aq_score'].mean():.3f}")
+print(f"  Median annual score: {addresses['annual_aq_score'].median():.3f}")
+print(f"  Std dev: {addresses['annual_aq_score'].std():.3f}")
+print(f"  Min: {addresses['annual_aq_score'].min():.3f}")
+print(f"  Max: {addresses['annual_aq_score'].max():.3f}")
+
+# Show distribution by monitor
+print(f"\n📍 ANNUAL SCORES BY MONITOR:")
+for idx, row in annual_monitor_scores.iterrows():
+    addr_count = (addresses['nearest_monitor_name'] == row['nearest_monitor_name']).sum()
+    print(f"  {row['nearest_monitor_name']}: Annual Score = {row['annual_aq_score']:.3f} ({addr_count:,} addresses)")
+
+# ============================================================================
+# STEP 4: SPATIAL JOIN TO NEIGHBORHOODS
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 4: SPATIAL JOIN TO NEIGHBORHOODS")
+print("="*80)
+
+# Ensure ALL data uses the same accurate CRS
+print(f"\nEnsuring consistent CRS: {TARGET_CRS}")
+
+if addresses.crs != TARGET_CRS:
+    print(f"  Reprojecting addresses from {addresses.crs} to {TARGET_CRS}...")
+    addresses = addresses.to_crs(TARGET_CRS)
+
+if neighborhoods.crs != TARGET_CRS:
+    print(f"  Reprojecting neighborhoods from {neighborhoods.crs} to {TARGET_CRS}...")
+    neighborhoods = neighborhoods.to_crs(TARGET_CRS)
+
+print(f"✓ All data in {TARGET_CRS} for accurate spatial operations")
+
+print("\nPerforming spatial join...")
+addresses_with_nbhd = gpd.sjoin(addresses, 
+                                 neighborhoods[['geometry', 'NAME', 'population']], 
+                                 how='left', 
+                                 predicate='within')
+
+# Rename for clarity
+if 'NAME' in addresses_with_nbhd.columns:
+    addresses_with_nbhd.rename(columns={'NAME': 'neighborhood_name'}, inplace=True)
+
+# Check for unmatched addresses
+unmatched = addresses_with_nbhd['population'].isna().sum()
+if unmatched > 0:
+    print(f"⚠️  {unmatched:,} addresses did not match to any neighborhood")
+    
+print(f"✓ Spatial join complete: {len(addresses_with_nbhd) - unmatched:,} addresses matched")
+
+# ============================================================================
+# STEP 5: NEIGHBORHOOD-LEVEL AGGREGATION
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 5: NEIGHBORHOOD-LEVEL AGGREGATION")
+print("="*80)
+
+print("\nAggregating air quality scores by neighborhood...")
+
+# Filter to valid addresses
+addresses_valid = addresses_with_nbhd[addresses_with_nbhd['population'].notna()].copy()
+
+# Group by neighborhood
+nbhd_stats = addresses_valid.groupby('neighborhood_name').agg({
+    'annual_aq_score': 'mean',
+    'population': 'first',
+    'geometry': 'count'
+}).reset_index()
+
+nbhd_stats.columns = ['neighborhood_name', 'mean_aq_score', 'population', 'address_count']
+
+print(f"✓ Aggregated to {len(nbhd_stats)} neighborhoods")
+
+print(f"\n📊 NEIGHBORHOOD STATISTICS:")
+print(f"  Mean neighborhood AQ score: {nbhd_stats['mean_aq_score'].mean():.3f}")
+print(f"  Std dev across neighborhoods: {nbhd_stats['mean_aq_score'].std():.3f}")
+print(f"  Best neighborhood score: {nbhd_stats['mean_aq_score'].min():.3f}")
+print(f"  Worst neighborhood score: {nbhd_stats['mean_aq_score'].max():.3f}")
+
+# ============================================================================
+# STEP 6: POPULATION-WEIGHTED CITY AIR QUALITY SCORE
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 6: POPULATION-WEIGHTED CITY AIR QUALITY SCORE")
+print("="*80)
+
+print("\n🔬 CALCULATING POPULATION-WEIGHTED CITY SCORE:")
+print("Formula from Chapter 4:")
+print("  City Score = Σ(Risk_Score_j × Population_j) / Σ(Population_j)")
+
+# Remove any neighborhoods with NaN or 0 population
+nbhd_stats_valid = nbhd_stats[nbhd_stats['population'] > 0].copy()
+
+# Calculate weighted components
+nbhd_stats_valid['weighted_score'] = nbhd_stats_valid['mean_aq_score'] * nbhd_stats_valid['population']
+total_weighted_score = nbhd_stats_valid['weighted_score'].sum()
+total_population = nbhd_stats_valid['population'].sum()
+
+# Final city air quality score
+city_aq_score = total_weighted_score / total_population
+
+print(f"\n✅ PORTLAND CITY AIR QUALITY SCORE: {city_aq_score:.3f}")
+print(f"   (Scale: 1.0 = best, 5.0 = worst)")
+
+# Compare to unweighted average
+unweighted_score = addresses['annual_aq_score'].mean()
+print(f"\n📊 COMPARISON:")
+print(f"  Population-weighted score: {city_aq_score:.3f}")
+print(f"  Unweighted average score: {unweighted_score:.3f}")
+print(f"  Difference: {abs(city_aq_score - unweighted_score):.3f}")
+
+# Interpretation with Chen et al. threshold
+print(f"\n🔬 CHEN ET AL. (2018) INTERPRETATION:")
+print(f"  +1 SD threshold (Score 4): {mu_city + sigma_city:.2f} μg/m³")
+if city_aq_score >= 4.0:
+    print(f"  ⚠️  City score indicates HIGH RISK (≥+1 SD)")
+    print(f"  Expected impact: +6.67 percentage point increase in severe distress")
+elif city_aq_score >= 3.0:
+    print(f"  City score indicates ELEVATED RISK (approaching +1 SD)")
+else:
+    print(f"  City score indicates relatively GOOD air quality")
+
+# ============================================================================
+# STEP 7: DETAILED BREAKDOWN FOR CHAPTER 5
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 7: DETAILED BREAKDOWN FOR THESIS")
+print("="*80)
+
+# Top 5 best and worst neighborhoods
+print("\n🏆 TOP 5 NEIGHBORHOODS (Best Air Quality - Lowest Risk):")
+best_neighborhoods = nbhd_stats_valid.nsmallest(5, 'mean_aq_score')
+for idx, row in best_neighborhoods.iterrows():
+    print(f"  {row['neighborhood_name']}:")
+    print(f"    AQ Score: {row['mean_aq_score']:.3f}, Pop: {row['population']:,.0f}, Addresses: {row['address_count']:,}")
+
+print("\n⚠️  TOP 5 NEIGHBORHOODS (Worst Air Quality - Highest Risk):")
+worst_neighborhoods = nbhd_stats_valid.nlargest(5, 'mean_aq_score')
+for idx, row in worst_neighborhoods.iterrows():
+    print(f"  {row['neighborhood_name']}:")
+    print(f"    AQ Score: {row['mean_aq_score']:.3f}, Pop: {row['population']:,.0f}, Addresses: {row['address_count']:,}")
+
+# ============================================================================
+# STEP 8: COMPREHENSIVE RESULTS TABLES
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 8: GENERATING COMPREHENSIVE RESULTS TABLES")
+print("="*80)
+
+excel_output = OUTPUT_DIR + 'portland_airquality_comprehensive_results.xlsx'
+
+print("\nCreating comprehensive results Excel file...")
+
+with pd.ExcelWriter(excel_output, engine='openpyxl') as writer:
+    
+    # Sheet 1: City Score Summary
+    print("  - Sheet 1: City Score Summary")
+    city_summary = pd.DataFrame({
+        'Metric': ['City Air Quality Score', 'Scale', 'Total Addresses', 'Total Population',
+                   'City Baseline (μ)', 'City Std Dev (σ)', 
+                   '+1 SD Threshold (Chen)', 'Mean Annual Score (unweighted)',
+                   'Difference (weighted - unweighted)'],
+        'Value': [
+            f"{city_aq_score:.3f}",
+            "1.0 (best) - 5.0 (worst)",
+            f"{len(addresses):,}",
+            f"{total_population:,.0f}",
+            f"{mu_city:.2f} μg/m³",
+            f"{sigma_city:.2f} μg/m³",
+            f"{mu_city + sigma_city:.2f} μg/m³",
+            f"{unweighted_score:.3f}",
+            f"{abs(city_aq_score - unweighted_score):.3f}"
+        ]
+    })
+    city_summary.to_excel(writer, sheet_name='City_Score', index=False)
+    
+    # Sheet 2: Monthly Risk Score Distribution
+    print("  - Sheet 2: Monthly Risk Score Distribution")
+    monthly_dist = []
+    for score in range(1, 6):
+        count = monthly_score_counts.get(score, 0)
+        pct = (count / len(monthly_zscores)) * 100
+        monthly_dist.append({
+            'Risk_Score': score,
+            'Risk_Level': risk_levels[score],
+            'Number_of_Months': count,
+            'Percentage': f"{pct:.1f}%"
+        })
+    
+    monthly_dist_df = pd.DataFrame(monthly_dist)
+    monthly_dist_df.to_excel(writer, sheet_name='Monthly_Risk_Distribution', index=False)
+    
+    # Sheet 3: Annual Score Statistics
+    print("  - Sheet 3: Annual Score Statistics")
+    score_stats = pd.DataFrame({
+        'Statistic': ['Mean', 'Median', 'Std Dev', 'Min', 'Max'],
+        'Value': [
+            f"{addresses['annual_aq_score'].mean():.3f}",
+            f"{addresses['annual_aq_score'].median():.3f}",
+            f"{addresses['annual_aq_score'].std():.3f}",
+            f"{addresses['annual_aq_score'].min():.3f}",
+            f"{addresses['annual_aq_score'].max():.3f}"
+        ]
+    })
+    score_stats.to_excel(writer, sheet_name='Annual_Score_Statistics', index=False)
+    
+    # Sheet 4: Monitor-Level Scores
+    print("  - Sheet 4: Scores by Monitoring Station")
+    monitor_summary = annual_monitor_scores.copy()
+    monitor_summary['address_count'] = monitor_summary['nearest_monitor_name'].apply(
+        lambda x: (addresses['nearest_monitor_name'] == x).sum()
+    )
+    monitor_summary.columns = ['Monitor_Name', 'Annual_AQ_Score', 'Addresses_Assigned']
+    monitor_summary.to_excel(writer, sheet_name='Monitor_Scores', index=False)
+    
+    # Sheet 5: Neighborhood Summary
+    print("  - Sheet 5: Neighborhood Statistics Summary")
+    nbhd_summary = pd.DataFrame({
+        'Statistic': ['Total Neighborhoods', 'Mean Neighborhood AQ Score', 
+                     'Std Dev Across Neighborhoods', 'Best Neighborhood Score', 
+                     'Worst Neighborhood Score'],
+        'Value': [
+            f"{len(nbhd_stats):,}",
+            f"{nbhd_stats['mean_aq_score'].mean():.3f}",
+            f"{nbhd_stats['mean_aq_score'].std():.3f}",
+            f"{nbhd_stats['mean_aq_score'].min():.3f}",
+            f"{nbhd_stats['mean_aq_score'].max():.3f}"
+        ]
+    })
+    nbhd_summary.to_excel(writer, sheet_name='Neighborhood_Summary', index=False)
+    
+    # Sheet 6: All Neighborhoods Ranked
+    print("  - Sheet 6: All Neighborhoods Ranked")
+    nbhd_ranked = nbhd_stats_valid.sort_values('mean_aq_score').copy()
+    nbhd_ranked['Rank'] = range(1, len(nbhd_ranked) + 1)
+    nbhd_ranked_output = nbhd_ranked[['Rank', 'neighborhood_name', 'mean_aq_score', 
+                                       'population', 'address_count']].copy()
+    nbhd_ranked_output.columns = ['Rank', 'Neighborhood', 'Mean_AQ_Score', 'Population', 'Address_Count']
+    nbhd_ranked_output.to_excel(writer, sheet_name='Neighborhoods_Ranked', index=False)
+    
+    # Sheet 7: Top 10 Best
+    print("  - Sheet 7: Top 10 Best Air Quality")
+    top_10_best = nbhd_ranked_output.head(10).copy()
+    top_10_best.to_excel(writer, sheet_name='Top_10_Best', index=False)
+    
+    # Sheet 8: Top 10 Worst
+    print("  - Sheet 8: Top 10 Worst Air Quality")
+    top_10_worst = nbhd_ranked_output.tail(10).copy()
+    top_10_worst.to_excel(writer, sheet_name='Top_10_Worst', index=False)
+    
+    # Sheet 9: Z-Score Thresholds
+    print("  - Sheet 9: Chen et al. Thresholds")
+    threshold_data = pd.DataFrame({
+        'Risk_Score': [1, 2, 3, 4, 5],
+        'Risk_Level': ['Very Low Risk', 'Low Risk', 'Elevated Risk', 'High Risk', 'Very High Risk'],
+        'Z_Score_Range': ['Z ≤ -1.0', '-1.0 < Z ≤ 0.0', '0.0 < Z ≤ +1.0', '+1.0 < Z ≤ +1.5', 'Z > +1.5'],
+        'PM2.5_Threshold_ugm3': [
+            f"≤ {mu_city - sigma_city:.2f}",
+            f"{mu_city - sigma_city:.2f} to {mu_city:.2f}",
+            f"{mu_city:.2f} to {mu_city + sigma_city:.2f}",
+            f"{mu_city + sigma_city:.2f} to {mu_city + 1.5*sigma_city:.2f}",
+            f"> {mu_city + 1.5*sigma_city:.2f}"
+        ]
+    })
+    threshold_data.to_excel(writer, sheet_name='Chen_Thresholds', index=False)
+
+print(f"\n✓ Saved comprehensive results: {excel_output}")
+
+# ============================================================================
+# STEP 9: SAVE INDIVIDUAL FILES
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 9: SAVING INDIVIDUAL CSV FILES")
+print("="*80)
+
+# Save addresses with air quality scores
+addresses_output = OUTPUT_DIR + 'portland_addresses_with_aq_scores.geojson'
+addresses_with_nbhd.to_file(addresses_output, driver='GeoJSON')
+print(f"✓ Saved addresses with AQ scores: {addresses_output}")
+
+# Save neighborhood statistics
+nbhd_output = OUTPUT_DIR + 'portland_neighborhood_aq_stats.csv'
+nbhd_stats_valid.to_csv(nbhd_output, index=False)
+print(f"✓ Saved neighborhood statistics: {nbhd_output}")
+
+# Save city score
+city_score_output = OUTPUT_DIR + 'portland_city_aq_score.csv'
+city_score_data = pd.DataFrame({
+    'city': ['Portland'],
+    'aq_score': [city_aq_score],
+    'total_addresses': [len(addresses)],
+    'total_population': [total_population],
+    'mu_city': [mu_city],
+    'sigma_city': [sigma_city],
+    'chen_threshold_ugm3': [mu_city + sigma_city]
+})
+city_score_data.to_csv(city_score_output, index=False)
+print(f"✓ Saved city-level score: {city_score_output}")
+
+# ============================================================================
+# STEP 10: VISUALIZATIONS
+# ============================================================================
+
+print("\n" + "="*80)
+print("STEP 10: CREATING VISUALIZATIONS")
+print("="*80)
+
+# Prepare spatial data
+print("\nPreparing spatial data for mapping...")
+neighborhoods_with_scores = neighborhoods.merge(
+    nbhd_stats_valid[['neighborhood_name', 'mean_aq_score']], 
+    left_on='NAME', 
+    right_on='neighborhood_name', 
+    how='left'
+)
+
+# Figure 1: Spatial Map
+print("\nCreating Figure 1: Spatial Air Quality Risk Map...")
+fig1, ax1 = plt.subplots(figsize=(12, 10))
+neighborhoods_with_scores.plot(column='mean_aq_score', 
+                              ax=ax1, 
+                              cmap='RdYlGn_r',
+                              vmin=1,
+                                vmax=5,
+                              legend=True,
+                              edgecolor='black',
+                              linewidth=0.5,
+                              legend_kwds={'label': 'Air Quality Risk Score (1-5)',
+                                          'orientation': 'horizontal',
+                                          'shrink': 0.8})
+ax1.set_title('Portland Air Quality Risk by Neighborhood', fontsize=14, fontweight='bold', pad=20)
+ax1.axis('off')
+fig1_output = OUTPUT_DIR + 'fig1_portland_aq_map.png'
+plt.tight_layout()
+plt.savefig(fig1_output, dpi=300, bbox_inches='tight')
+plt.close()
+print(f"✓ Saved: {fig1_output}")
+
+# Figure 2: Monthly Risk Score Distribution
+print("\nCreating Figure 2: Monthly Risk Score Distribution...")
+fig2, ax2 = plt.subplots(figsize=(10, 6))
+monthly_score_counts.plot(kind='bar', ax=ax2, color=['#2ecc71', '#3498db', '#f39c12', '#e74c3c', '#c0392b'])
+ax2.set_xlabel('Risk Score', fontsize=12)
+ax2.set_ylabel('Number of Months', fontsize=12)
+ax2.set_title('Portland: Monthly Air Quality Risk Score Distribution (2024)', fontsize=14, fontweight='bold')
+ax2.set_xticklabels(['1\nVery Low', '2\nLow', '3\nElevated', '4\nHigh', '5\nVery High'], rotation=0)
+ax2.grid(axis='y', alpha=0.3)
+fig2_output = OUTPUT_DIR + 'fig2_monthly_risk_distribution.png'
+plt.tight_layout()
+plt.savefig(fig2_output, dpi=300, bbox_inches='tight')
+plt.close()
+print(f"✓ Saved: {fig2_output}")
+
+# Figure 3: Annual Score Distribution
+print("\nCreating Figure 3: Annual Address Score Distribution...")
+fig3, ax3 = plt.subplots(figsize=(10, 6))
+addresses['annual_aq_score'].hist(bins=30, ax=ax3, color='#3498db', edgecolor='black', alpha=0.7)
+ax3.axvline(city_aq_score, color='red', linestyle='--', linewidth=2, 
+           label=f'City Score: {city_aq_score:.2f}')
+ax3.axvline(4.0, color='orange', linestyle='--', linewidth=2, 
+           label='Chen et al. +1 SD threshold')
+ax3.set_xlabel('Annual Air Quality Risk Score', fontsize=12)
+ax3.set_ylabel('Number of Addresses', fontsize=12)
+ax3.set_title('Portland: Distribution of Annual Air Quality Scores', fontsize=14, fontweight='bold')
+ax3.legend(fontsize=10)
+ax3.grid(axis='y', alpha=0.3)
+fig3_output = OUTPUT_DIR + 'fig3_annual_score_distribution.png'
+plt.tight_layout()
+plt.savefig(fig3_output, dpi=300, bbox_inches='tight')
+plt.close()
+print(f"✓ Saved: {fig3_output}")
+
+# Figure 4: Z-Score Timeline
+print("\nCreating Figure 4: Monthly Z-Score Timeline...")
+fig4, ax4 = plt.subplots(figsize=(12, 6))
+for monitor in monthly_zscores['monitor_name'].unique():
+    monitor_data = monthly_zscores[monthly_zscores['monitor_name'] == monitor].sort_values('month')
+    ax4.plot(monitor_data['month'], monitor_data['z_score'], marker='o', 
+            label=monitor, linewidth=2)
+
+ax4.axhline(0, color='black', linestyle='-', linewidth=1, alpha=0.3)
+ax4.axhline(1.0, color='orange', linestyle='--', linewidth=2, label='Chen +1 SD')
+ax4.axhline(-1.0, color='green', linestyle='--', linewidth=2, label='-1 SD')
+ax4.set_xlabel('Month (2024)', fontsize=12)
+ax4.set_ylabel('Z-Score', fontsize=12)
+ax4.set_title('Portland: Monthly PM2.5 Z-Scores Throughout 2024', fontsize=14, fontweight='bold')
+ax4.legend(fontsize=9)
+ax4.grid(alpha=0.3)
+ax4.set_xticks(range(1, 13))
+ax4.set_xticklabels(['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
+                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'])
+fig4_output = OUTPUT_DIR + 'fig4_zscore_timeline.png'
+plt.tight_layout()
+plt.savefig(fig4_output, dpi=300, bbox_inches='tight')
+plt.close()
+print(f"✓ Saved: {fig4_output}")
+
+print("\n✓ All visualizations created successfully!")
+
+# Figure 5: Spatial Detail - Monitors and Address Scores
+print("\nCreating Figure 5: Detailed Spatial Map (Monitors + Address Scores)...")
+
+# Load monitoring stations
+stations_gdf = gpd.read_file(STATIONS_FILE)
+if stations_gdf.crs != TARGET_CRS:
+    stations_gdf = stations_gdf.to_crs(TARGET_CRS)
+
+fig5, ax5 = plt.subplots(figsize=(14, 12))
+
+# Plot addresses colored by air quality score
+addresses_with_nbhd.plot(column='annual_aq_score',
+                         ax=ax5,
+                         cmap='RdYlGn_r',
+                         markersize=0.5,
+                         alpha=0.6,
+                         vmin=1,
+                         vmax=5,
+                         legend=True,
+                         legend_kwds={'label': 'Annual Air Quality Risk Score (1-5)',
+                                     'orientation': 'horizontal',
+                                     'shrink': 0.8,
+                                     'pad': 0.05})
+
+# Plot monitoring stations as larger markers
+stations_gdf.plot(ax=ax5,
+                 color='black',
+                 markersize=200,
+                 marker='s',
+                 edgecolor='white',
+                 linewidth=2,
+                 alpha=0.9,
+                 zorder=5)
+
+# Add monitor labels
+for idx, station in stations_gdf.iterrows():
+    ax5.annotate(station['monitor_name'],
+                xy=(station.geometry.x, station.geometry.y),
+                xytext=(5, 5),
+                textcoords='offset points',
+                fontsize=8,
+                fontweight='bold',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8),
+                zorder=6)
+
+# Plot neighborhood boundaries for context
+neighborhoods_with_scores.boundary.plot(ax=ax5, 
+                                       edgecolor='gray', 
+                                       linewidth=0.5,
+                                       alpha=0.3)
+
+ax5.set_title('Portland Air Quality Risk: Address-Level Scores and Monitor Locations', 
+             fontsize=14, fontweight='bold', pad=20)
+ax5.axis('off')
+
+# Add legend for monitors
+from matplotlib.lines import Line2D
+legend_elements = [
+    Line2D([0], [0], marker='s', color='w', markerfacecolor='black', 
+           markersize=10, label='Air Quality Monitor', markeredgecolor='white', markeredgewidth=1)
+]
+ax5.legend(handles=legend_elements, loc='upper left', fontsize=10)
+
+fig5_output = OUTPUT_DIR + 'fig5_spatial_detail_monitors_addresses.png'
+plt.tight_layout()
+plt.savefig(fig5_output, dpi=300, bbox_inches='tight')
+plt.close()
+print(f"✓ Saved: {fig5_output}")
+
+print("\n✓ All visualizations created successfully!")
+
+# ============================================================================
+# FINAL SUMMARY
+# ============================================================================
+
+print("\n" + "="*80)
+print("METHODOLOGY COMPLETE")
+print("="*80)
+
+print(f"\n🎯 PORTLAND AIR QUALITY CONTEXTUAL CUE SCORE: {city_aq_score:.3f}")
+
+print("\n✅ Data files created:")
+print(f"   {addresses_output}")
+print(f"   {nbhd_output}")
+print(f"   {city_score_output}")
+print(f"\n✅ Comprehensive results table:")
+print(f"   {excel_output}")
+print(f"   (9 sheets with all statistics)")
+print(f"\n✅ Visualizations created:")
+print(f"   {fig1_output}")
+print(f"   {fig2_output}")
+print(f"   {fig3_output}")
+print(f"   {fig4_output}")
+print(f"   {fig5_output}")
+
+print("\n📊 Ready for UMWI calculation (3-15 scale)")
+print("="*80)
